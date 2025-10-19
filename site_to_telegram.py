@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-site_to_telegram.py (updated)
-- HTML mode: can optionally fetch each article page to resolve proper title/summary (og:title, og:description).
-- RSS mode supported as before.
+site_to_telegram.py (photo + better summary)
+- Grabs title/summary/image from each article page (og:title, og:description, og:image, plus first paragraphs).
+- Sends a photo with HTML caption: <b>Title</b> as a clickable link, then medium summary, then channel link at the end.
 """
 
 import argparse
@@ -31,15 +31,16 @@ except Exception:
     raise
 
 STATE_FILE = "seen.json"
-DEFAULT_UA = "Mozilla/5.0 (compatible; site2tg/1.1)"
-
+DEFAULT_UA = "Mozilla/5.0 (compatible; site2tg/1.2)"
 TELEGRAM_API_BASE = "https://api.telegram.org"
+
 
 @dataclass
 class Item:
     title: str
     url: str
     summary: Optional[str] = None
+    image: Optional[str] = None
 
 
 def load_seen(path: str) -> set:
@@ -81,9 +82,7 @@ def extract_items_html(html_text: str, base_url: Optional[str], css_selector: st
             continue
         url = urljoin(base_url, link.get("href")) if base_url else link.get("href")
         title = link.get_text(strip=True) or url
-        summary_node = node.find_next("p")
-        summary = summary_node.get_text(strip=True) if summary_node else None
-        items.append(Item(title=title, url=url, summary=summary))
+        items.append(Item(title=title, url=url))
     return items
 
 
@@ -98,38 +97,94 @@ def extract_items_rss(feed_url: str, limit: int) -> List[Item]:
         summary = None
         if "summary" in entry:
             summary = re.sub("<[^<]+?>", "", entry.summary or "").strip()
-        items.append(Item(title=title, url=link, summary=summary))
+        img = None
+        items.append(Item(title=title, url=link, summary=summary, image=img))
     return items
 
 
-def build_message(item: Item, prefix: str = "", suffix: str = "", max_len: int = 3800) -> str:
-    parts = []
-    if prefix:
-        parts.append(prefix.strip())
+def medium_summary(text: str, target_len: int = 600) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= target_len:
+        return text
+    # cut on sentence boundary if possible
+    cut = text[: target_len + 80]
+    m = re.search(r"[.!?…] (?=[А-ЯA-Z])", cut[::-1])
+    if m:
+        idx_from_end = m.end()
+        idx = len(cut) - idx_from_end
+        return cut[:idx].rstrip() + "…"
+    return cut.rstrip() + "…"
+
+
+def resolve_from_page(url: str, base_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return (title, summary, image_url) from article page."""
+    try:
+        html_text = fetch_html(url)
+        soup = BeautifulSoup(html_text, "html.parser")
+        # title
+        title_tag = soup.find("meta", property="og:title")
+        title = title_tag.get("content").strip() if title_tag and title_tag.get("content") else None
+        if not title and soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        # image
+        img_tag = soup.find("meta", property="og:image")
+        image = img_tag.get("content").strip() if img_tag and img_tag.get("content") else None
+        if image and base_url:
+            image = urljoin(base_url, image)
+        # summary
+        desc_tag = soup.find("meta", property="og:description")
+        summary = desc_tag.get("content").strip() if desc_tag and desc_tag.get("content") else None
+        if not summary:
+            # concatenate first few paragraphs
+            ps = soup.find_all("p")
+            chunks = []
+            for p in ps[:6]:
+                t = p.get_text(" ", strip=True)
+                if t and len(t) > 40:
+                    chunks.append(t)
+            if chunks:
+                summary = medium_summary(" ".join(chunks), target_len=600)
+        else:
+            summary = medium_summary(summary, target_len=600)
+        return title, summary, image
+    except Exception:
+        return None, None, None
+
+
+def build_caption(item: Item, suffix: str = "", max_len: int = 1024) -> str:
+    """HTML caption: bold linked title, summary, then suffix with channel link."""
     safe_title = html.escape(item.title)
     safe_url = html.escape(item.url)
-    parts.append(f"<b>{safe_title}</b>\n{safe_url}")
+    parts = [f"<b><a href=\"{safe_url}\">{safe_title}</a></b>"]
     if item.summary:
-        summary = item.summary.strip()
-        if len(summary) > 1000:
-            summary = summary[:1000].rstrip() + "…"
-        parts.append(html.escape(summary))
+        parts.append(html.escape(item.summary))
     if suffix:
-        parts.append(suffix.strip())
-    text = "\n\n".join(parts).strip()
-    if len(text) > max_len:
-        text = text[: max_len - 1] + "…"
-    return text
+        parts.append(html.escape(suffix.strip()))
+    caption = "\n\n".join(parts).strip()
+    if len(caption) > max_len:
+        caption = caption[: max_len - 1] + "…"
+    return caption
+
+
+def telegram_send_photo(token: str, chat_id: str, photo_url: str, caption: str, retries: int = 3) -> Tuple[bool, str]:
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "photo": photo_url}
+    last_err = ""
+    for i in range(retries):
+        try:
+            r = requests.post(url, data=data, timeout=20)
+            if r.status_code == 200:
+                return True, ""
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(2 * (i + 1))
+    return False, last_err
 
 
 def telegram_send_message(token: str, chat_id: str, text: str, disable_preview: bool = False, retries: int = 3) -> Tuple[bool, str]:
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": disable_preview,
-    }
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": disable_preview}
     last_err = ""
     for i in range(retries):
         try:
@@ -143,39 +198,19 @@ def telegram_send_message(token: str, chat_id: str, text: str, disable_preview: 
     return False, last_err
 
 
-def resolve_from_page(url: str) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        html_text = fetch_html(url)
-        soup = BeautifulSoup(html_text, "html.parser")
-        title_tag = soup.find("meta", property="og:title")
-        title = title_tag.get("content").strip() if title_tag and title_tag.get("content") else None
-        if not title and soup.title and soup.title.string:
-            title = soup.title.string.strip()
-        desc_tag = soup.find("meta", property="og:description")
-        summary = desc_tag.get("content").strip() if desc_tag and desc_tag.get("content") else None
-        if not summary:
-            p = soup.find("p")
-            if p:
-                summary = p.get_text(" ", strip=True)
-        return title, summary
-    except Exception:
-        return None, None
-
-
 def main():
     parser = argparse.ArgumentParser(description="Scrape a site or RSS and post new items to Telegram.")
     parser.add_argument("--mode", choices=["html", "rss"], required=True)
     parser.add_argument("--url", required=True)
-    parser.add_argument("--item-selector", help="CSS selector (html mode). Example: 'article h2 a'")
+    parser.add_argument("--item-selector", help="CSS selector (html mode)")
     parser.add_argument("--base-url", help="Base URL for relative links (html mode).")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--state", default=STATE_FILE)
-    parser.add_argument("--post-prefix", default="📰 Новая публикация:")
-    parser.add_argument("--post-suffix", default="")
+    parser.add_argument("--post-prefix", default="")  # no prefix by default
+    parser.add_argument("--post-suffix", default="")  # e.g., your channel link
+    parser.add_argument("--with-photo", action="store_true", help="Attach article photo if available.")
     parser.add_argument("--disable-preview", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--resolve-title", action="store_true", help="Fetch article page to resolve proper title.")
-    parser.add_argument("--resolve-summary", action="store_true", help="Fetch article page to resolve short summary.")
     args = parser.parse_args()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -201,24 +236,31 @@ def main():
         if uid in seen:
             continue
 
-        if args.resolve_title or args.resolve_summary:
-            t, s = resolve_from_page(item.url)
-            if args.resolve_title and t:
-                item.title = t
-            if args.resolve_summary and s:
-                item.summary = s
+        # Resolve title/summary/image from article page
+        t, s, img = resolve_from_page(item.url, base_url=args.base_url)
+        if t:
+            item.title = t
+        if s:
+            item.summary = s
+        if img:
+            item.image = img
 
-        message = build_message(item, prefix=args.post_prefix, suffix=args.post_suffix)
+        caption = build_caption(item, suffix=args.post_suffix)
+
         if args.dry_run:
-            print("DRY RUN —— would post:\n", message, "\n", "-" * 40)
+            print("DRY RUN —— would post:\n", caption, "\nPHOTO:", item.image, "\n", "-" * 40)
         else:
-            ok, err = telegram_send_message(token, chat_id, message, disable_preview=args.disable_preview)
+            if args.with-photo and item.image:
+                ok, err = telegram_send_photo(token, chat_id, item.image, caption)
+            else:
+                ok, err = telegram_send_message(token, chat_id, caption, disable_preview=False)
             if not ok:
                 print(f"Failed to post '{item.title}': {err}", file=sys.stderr)
                 continue
+
         seen.add(uid)
         posted_count += 1
-        time.sleep(1.5)
+        time.sleep(1.2)
 
     save_seen(args.state, seen)
     print(f"Done. Posted {posted_count} new item(s).")
