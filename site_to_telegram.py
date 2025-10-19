@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-site_to_telegram.py (photo + better summary) — fixed with_photo flag
+site_to_telegram.py — РулЁжка-стайл
+Формирует посты в стиле проекта:
+- строка с эмодзи в начале;
+- жирный заголовок;
+- абзац среднего размера;
+- 2–4 пункта со значимыми фактами (•);
+- ссылка на источник;
+- подпись: "🏎️ *РулЁжка* (https://t.me/drive_hedgehog)";
+- отправляет фото (og:image) с HTML caption.
+Поддержка тем (message_thread_id) и опционального копирования в канал.
 """
+
 import argparse
 import hashlib
 import html
@@ -11,25 +22,15 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import urljoin
 
 import requests
+from bs4 import BeautifulSoup
 
-try:
-    import feedparser  # type: ignore
-except Exception:
-    feedparser = None
-
-try:
-    from bs4 import BeautifulSoup  # type: ignore
-except Exception:
-    print("BeautifulSoup (bs4) is required for HTML parsing. Add it to requirements.txt and install.", file=sys.stderr)
-    raise
-
-STATE_FILE = "seen.json"
-DEFAULT_UA = "Mozilla/5.0 (compatible; site2tg/1.2)"
+DEFAULT_UA = "Mozilla/5.0 (compatible; site2tg/1.4-rulezka)"
 TELEGRAM_API_BASE = "https://api.telegram.org"
+STATE_FILE = "seen.json"
 
 
 @dataclass
@@ -38,14 +39,14 @@ class Item:
     url: str
     summary: Optional[str] = None
     image: Optional[str] = None
+    body: Optional[str] = None
 
 
 def load_seen(path: str) -> set:
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return set(data)
+                return set(json.load(f))
         except Exception:
             return set()
     return set()
@@ -60,199 +61,142 @@ def hash_id(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def fetch_html(url: str, headers: Optional[dict] = None, timeout: int = 20) -> str:
-    h = {"User-Agent": DEFAULT_UA}
-    if headers:
-        h.update(headers)
-    r = requests.get(url, headers=h, timeout=timeout)
+def fetch_html(url: str) -> str:
+    r = requests.get(url, headers={"User-Agent": DEFAULT_UA}, timeout=20)
     r.raise_for_status()
     return r.text
 
 
-def extract_items_html(html_text: str, base_url: Optional[str], css_selector: str, limit: int) -> List[Item]:
+def extract_links(html_text: str, base_url: Optional[str], selector: str, limit: int) -> List[str]:
     soup = BeautifulSoup(html_text, "html.parser")
-    nodes = soup.select(css_selector)[:limit or None]
-    items: List[Item] = []
-    for node in nodes:
-        link = node if node.name == "a" else node.find("a")
-        if not link or not link.get("href"):
-            continue
-        url = urljoin(base_url, link.get("href")) if base_url else link.get("href")
-        title = link.get_text(strip=True) or url
-        items.append(Item(title=title, url=url))
-    return items
+    nodes = soup.select(selector)[:limit]
+    links = []
+    for n in nodes:
+        a = n if n.name == "a" else n.find("a")
+        if a and a.get("href"):
+            links.append(urljoin(base_url, a["href"]) if base_url else a["href"])
+    return list(dict.fromkeys(links))  # remove duplicates
 
 
-def extract_items_rss(feed_url: str, limit: int) -> List[Item]:
-    if feedparser is None:
-        raise RuntimeError("feedparser is required for RSS/Atom mode. Add it to requirements.txt and install.")
-    feed = feedparser.parse(feed_url)
-    items: List[Item] = []
-    for entry in feed.entries[:limit or None]:
-        title = entry.get("title") or "(без названия)"
-        link = entry.get("link") or ""
-        summary = None
-        if "summary" in entry:
-            summary = re.sub("<[^<]+?>", "", entry.summary or "").strip()
-        img = None
-        items.append(Item(title=title, url=link, summary=summary, image=img))
-    return items
+def smart_sentences(text: str) -> List[str]:
+    parts = re.split(r"(?<=[.!?…])\s+", text)
+    return [p.strip() for p in parts if len(p.strip()) > 40]
 
 
-def medium_summary(text: str, target_len: int = 600) -> str:
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= target_len:
-        return text
-    cut = text[: target_len + 80]
-    # try to cut at sentence boundary
-    for sep in [". ", "! ", "? ", "… "]:
-        idx = cut.rfind(sep)
-        if idx > target_len // 2:
-            return cut[: idx + 1].rstrip() + "…"
-    return cut.rstrip() + "…"
+EMOJI_MAP = [
+    (["дтп", "авар", "столкнов"], "🚨"),
+    (["штраф", "налог", "пошлин", "утильсбор"], "💸"),
+    (["электро", "ev", "батар", "заряд"], "⚡"),
+    (["бензин", "дизел", "топлив"], "⛽"),
+    (["трасс", "дорог", "ремонт"], "🛣️"),
+    (["гонк", "трек", "спорт"], "🏁"),
+]
 
 
-def resolve_from_page(url: str, base_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    try:
-        html_text = fetch_html(url)
-        soup = BeautifulSoup(html_text, "html.parser")
-        title_tag = soup.find("meta", property="og:title")
-        title = title_tag.get("content").strip() if title_tag and title_tag.get("content") else None
-        if not title and soup.title and soup.title.string:
-            title = soup.title.string.strip()
-        img_tag = soup.find("meta", property="og:image")
-        image = img_tag.get("content").strip() if img_tag and img_tag.get("content") else None
-        if image and base_url:
-            image = urljoin(base_url, image)
-        desc_tag = soup.find("meta", property="og:description")
-        summary = desc_tag.get("content").strip() if desc_tag and desc_tag.get("content") else None
-        if not summary:
-            ps = soup.find_all("p")
-            chunks = []
-            for p in ps[:6]:
-                t = p.get_text(" ", strip=True)
-                if t and len(t) > 40:
-                    chunks.append(t)
-            if chunks:
-                summary = medium_summary(" ".join(chunks), target_len=600)
-        else:
-            summary = medium_summary(summary, target_len=600)
-        return title, summary, image
-    except Exception:
-        return None, None, None
+def choose_emoji(title: str, text: str) -> str:
+    s = (title + " " + text).lower()
+    for keys, e in EMOJI_MAP:
+        if any(k in s for k in keys):
+            return e
+    return "🚗"
 
 
-def build_caption(item: Item, suffix: str = "", max_len: int = 1024) -> str:
-    safe_title = html.escape(item.title)
-    safe_url = html.escape(item.url)
-    parts = [f"<b><a href=\"{safe_url}\">{safe_title}</a></b>"]
+def parse_article(url: str, base_url: Optional[str]) -> Item:
+    html_text = fetch_html(url)
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    title = soup.find("meta", property="og:title")
+    title = title["content"].strip() if title else soup.title.string.strip()
+
+    image = soup.find("meta", property="og:image")
+    image = image["content"].strip() if image else None
+    if image and base_url:
+        image = urljoin(base_url, image)
+
+    desc = soup.find("meta", property="og:description")
+    summary = desc["content"].strip() if desc else ""
+
+    ps = [p.get_text(" ", strip=True) for p in soup.find_all("p") if len(p.get_text(strip=True)) > 40]
+    body = " ".join(ps[:10])
+    sentences = smart_sentences(body)
+    bullets = sentences[:4]
+
+    return Item(title=title, url=url, summary=summary, image=image, body="\n".join(bullets))
+
+
+def build_caption(item: Item) -> str:
+    emoji = choose_emoji(item.title, (item.summary or "") + (item.body or ""))
+    parts = [emoji, f"<b>{html.escape(item.title)}</b>"]
+
     if item.summary:
         parts.append(html.escape(item.summary))
-    if suffix:
-        parts.append(html.escape(suffix.strip()))
-    caption = "\n\n".join(parts).strip()
-    if len(caption) > max_len:
-        caption = caption[: max_len - 1] + "…"
-    return caption
+
+    if item.body:
+        lines = [f"• {html.escape(x)}" for x in item.body.splitlines() if x.strip()]
+        parts.append("\n".join(lines))
+
+    parts.append(item.url)
+    parts.append("🏎️ *РулЁжка* (https://t.me/drive_hedgehog)")
+
+    caption = "\n\n".join(parts)
+    return caption[:1020]  # Telegram caption limit
 
 
-def telegram_send_photo(token: str, chat_id: str, photo_url: str, caption: str, retries: int = 3):
+def send_photo(token: str, chat_id: str, caption: str, photo: Optional[str], thread_id: Optional[int] = None) -> int:
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "photo": photo_url}
-    last_err = ""
-    for i in range(retries):
-        try:
-            r = requests.post(url, data=data, timeout=20)
-            if r.status_code == 200:
-                return True, ""
-            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
-        except Exception as e:
-            last_err = str(e)
-        time.sleep(2 * (i + 1))
-    return False, last_err
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    if thread_id:
+        data["message_thread_id"] = thread_id
+    if photo:
+        data["photo"] = photo
+    r = requests.post(url, data=data)
+    r.raise_for_status()
+    return r.json()["result"]["message_id"]
 
 
-def telegram_send_message(token: str, chat_id: str, text: str, disable_preview: bool = False, retries: int = 3):
-    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": disable_preview}
-    last_err = ""
-    for i in range(retries):
-        try:
-            r = requests.post(url, data=payload, timeout=20)
-            if r.status_code == 200:
-                return True, ""
-            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
-        except Exception as e:
-            last_err = str(e)
-        time.sleep(2 * (i + 1))
-    return False, last_err
+def copy_message(token: str, from_chat: str, msg_id: int, to_chat: str):
+    url = f"{TELEGRAM_API_BASE}/bot{token}/copyMessage"
+    data = {"from_chat_id": from_chat, "message_id": msg_id, "chat_id": to_chat}
+    requests.post(url, data=data, timeout=20)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scrape a site or RSS and post new items to Telegram.")
-    parser.add_argument("--mode", choices=["html", "rss"], required=True)
-    parser.add_argument("--url", required=True)
-    parser.add_argument("--item-selector", help="CSS selector (html mode)")
-    parser.add_argument("--base-url", help="Base URL for relative links (html mode).")
-    parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--state", default=STATE_FILE)
-    parser.add_argument("--post-prefix", default="")
-    parser.add_argument("--post-suffix", default="")
-    parser.add_argument("--with-photo", action="store_true", help="Attach article photo if available.")
-    parser.add_argument("--disable-preview", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--item-selector", required=True)
+    ap.add_argument("--limit", type=int, default=5)
+    ap.add_argument("--base-url")
+    ap.add_argument("--state", default=STATE_FILE)
+    ap.add_argument("--with-photo", action="store_true")
+    ap.add_argument("--thread-id", type=int)
+    ap.add_argument("--copy-to-chat-id")
+    args = ap.parse_args()
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        print("Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.", file=sys.stderr)
-        sys.exit(2)
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    thread_id_env = os.getenv("TELEGRAM_THREAD_ID", "")
+    copy_chat = os.getenv("TELEGRAM_COPY_TO_CHAT_ID", "")
+
+    thread_id = args.thread_id or (int(thread_id_env) if thread_id_env.isdigit() else None)
 
     seen = load_seen(args.state)
+    listing_html = fetch_html(args.url)
+    links = extract_links(listing_html, args.base_url, args.item_selector, args.limit)
 
-    if args.mode == "html":
-        if not args.item_selector:
-            print("--item-selector is required in html mode (e.g., 'article h2 a')", file=sys.stderr)
-            sys.exit(2)
-        html_text = fetch_html(args.url)
-        items = extract_items_html(html_text, args.base_url, args.item_selector, args.limit)
-    else:
-        items = extract_items_rss(args.url, args.limit)
-
-    posted_count = 0
-    for item in items:
-        uid = hash_id(item.url or item.title)
+    for link in links:
+        uid = hash_id(link)
         if uid in seen:
             continue
 
-        t, s, img = resolve_from_page(item.url, base_url=args.base_url)
-        if t:
-            item.title = t
-        if s:
-            item.summary = s
-        if img:
-            item.image = img
-
-        caption = build_caption(item, suffix=args.post_suffix)
-
-        if args.dry_run:
-            print("DRY RUN —— would post:\n", caption, "\nPHOTO:", item.image, "\n", "-" * 40)
-        else:
-            if args.with_photo and item.image:
-                ok, err = telegram_send_photo(token, chat_id, item.image, caption)
-            else:
-                ok, err = telegram_send_message(token, chat_id, caption, disable_preview=False)
-            if not ok:
-                print(f"Failed to post '{item.title}': {err}", file=sys.stderr)
-                continue
+        item = parse_article(link, args.base_url)
+        caption = build_caption(item)
+        msg_id = send_photo(token, chat_id, caption, item.image if args.with_photo else None, thread_id)
+        if copy_chat:
+            copy_message(token, chat_id, msg_id, copy_chat)
 
         seen.add(uid)
-        posted_count += 1
+        save_seen(args.state, seen)
         time.sleep(1.2)
-
-    save_seen(args.state, seen)
-    print(f"Done. Posted {posted_count} new item(s).")
 
 
 if __name__ == "__main__":
