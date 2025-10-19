@@ -21,7 +21,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}            # если постим в тему
           TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }} # если нужно копировать
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # LLM-стилизация
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # для LLM-полировки (необязательно)
         run: |
           python site_to_telegram.py \
             --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8" \
