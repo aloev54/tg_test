@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-site_to_telegram.py (photo + better summary)
-- Grabs title/summary/image from each article page (og:title, og:description, og:image, plus first paragraphs).
-- Sends a photo with HTML caption: <b>Title</b> as a clickable link, then medium summary, then channel link at the end.
+site_to_telegram.py (photo + better summary) — fixed with_photo flag
 """
-
 import argparse
 import hashlib
 import html
@@ -106,36 +103,30 @@ def medium_summary(text: str, target_len: int = 600) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= target_len:
         return text
-    # cut on sentence boundary if possible
     cut = text[: target_len + 80]
-    m = re.search(r"[.!?…] (?=[А-ЯA-Z])", cut[::-1])
-    if m:
-        idx_from_end = m.end()
-        idx = len(cut) - idx_from_end
-        return cut[:idx].rstrip() + "…"
+    # try to cut at sentence boundary
+    for sep in [". ", "! ", "? ", "… "]:
+        idx = cut.rfind(sep)
+        if idx > target_len // 2:
+            return cut[: idx + 1].rstrip() + "…"
     return cut.rstrip() + "…"
 
 
 def resolve_from_page(url: str, base_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Return (title, summary, image_url) from article page."""
     try:
         html_text = fetch_html(url)
         soup = BeautifulSoup(html_text, "html.parser")
-        # title
         title_tag = soup.find("meta", property="og:title")
         title = title_tag.get("content").strip() if title_tag and title_tag.get("content") else None
         if not title and soup.title and soup.title.string:
             title = soup.title.string.strip()
-        # image
         img_tag = soup.find("meta", property="og:image")
         image = img_tag.get("content").strip() if img_tag and img_tag.get("content") else None
         if image and base_url:
             image = urljoin(base_url, image)
-        # summary
         desc_tag = soup.find("meta", property="og:description")
         summary = desc_tag.get("content").strip() if desc_tag and desc_tag.get("content") else None
         if not summary:
-            # concatenate first few paragraphs
             ps = soup.find_all("p")
             chunks = []
             for p in ps[:6]:
@@ -152,7 +143,6 @@ def resolve_from_page(url: str, base_url: Optional[str] = None) -> Tuple[Optiona
 
 
 def build_caption(item: Item, suffix: str = "", max_len: int = 1024) -> str:
-    """HTML caption: bold linked title, summary, then suffix with channel link."""
     safe_title = html.escape(item.title)
     safe_url = html.escape(item.url)
     parts = [f"<b><a href=\"{safe_url}\">{safe_title}</a></b>"]
@@ -166,7 +156,7 @@ def build_caption(item: Item, suffix: str = "", max_len: int = 1024) -> str:
     return caption
 
 
-def telegram_send_photo(token: str, chat_id: str, photo_url: str, caption: str, retries: int = 3) -> Tuple[bool, str]:
+def telegram_send_photo(token: str, chat_id: str, photo_url: str, caption: str, retries: int = 3):
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
     data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML", "photo": photo_url}
     last_err = ""
@@ -182,7 +172,7 @@ def telegram_send_photo(token: str, chat_id: str, photo_url: str, caption: str, 
     return False, last_err
 
 
-def telegram_send_message(token: str, chat_id: str, text: str, disable_preview: bool = False, retries: int = 3) -> Tuple[bool, str]:
+def telegram_send_message(token: str, chat_id: str, text: str, disable_preview: bool = False, retries: int = 3):
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": disable_preview}
     last_err = ""
@@ -206,8 +196,8 @@ def main():
     parser.add_argument("--base-url", help="Base URL for relative links (html mode).")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--state", default=STATE_FILE)
-    parser.add_argument("--post-prefix", default="")  # no prefix by default
-    parser.add_argument("--post-suffix", default="")  # e.g., your channel link
+    parser.add_argument("--post-prefix", default="")
+    parser.add_argument("--post-suffix", default="")
     parser.add_argument("--with-photo", action="store_true", help="Attach article photo if available.")
     parser.add_argument("--disable-preview", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -236,7 +226,6 @@ def main():
         if uid in seen:
             continue
 
-        # Resolve title/summary/image from article page
         t, s, img = resolve_from_page(item.url, base_url=args.base_url)
         if t:
             item.title = t
@@ -250,7 +239,7 @@ def main():
         if args.dry_run:
             print("DRY RUN —— would post:\n", caption, "\nPHOTO:", item.image, "\n", "-" * 40)
         else:
-            if args.with-photo and item.image:
+            if args.with_photo and item.image:
                 ok, err = telegram_send_photo(token, chat_id, item.image, caption)
             else:
                 ok, err = telegram_send_message(token, chat_id, caption, disable_preview=False)
