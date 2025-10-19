@@ -1,7 +1,7 @@
 name: site2tg-autonews
 on:
   schedule:
-    # каждые 2 часа по UTC в 04..20, это 07..23 по МСК
+    # 04..20 UTC = 07..23 MSK, каждые 2 часа
     - cron: "0 4-20/2 * * *"
   workflow_dispatch: {}
 
@@ -15,13 +15,13 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: pip install requests beautifulsoup4
-      - name: Post in РулЁжка style (no bullets, italics, with photo)
+      - name: Post in РулЁжка style (LLM + emoji numbers)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}            # если постим в тему
-          TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }} # если нужно копировать в канал
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # для LLM-полировки
+          TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }} # если нужно копировать
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # LLM-стилизация
         run: |
           python site_to_telegram.py \
             --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8" \
