@@ -2,18 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 site_to_telegram.py — РулЁжка-стайл (LLM + анти-реклама)
+Изменения:
+- Чистим хвосты у заголовков: «Главное :: Autonews», «— Autonews», «| Autonews» и т.п.
+- Больше курсива по ключевым словам (4–8 терминов).
+- Пост без пунктов, ссылка на источник не вставляется, есть подпись канала и фото.
 
 Формат поста:
-- первая строка: эмодзи + жирный заголовок
-- далее: текст средней длины (без пунктов), с несколькими ключевыми словами в курсиве
-- НИКАКИХ ссылок на источник
-- подпись: 🏎️ *РулЁжка* (https://t.me/drive_hedgehog)
-- отправляем как photo + HTML caption; прикрепляем og:image
-
-Опционально:
-- message_thread_id (пост в тему в группе)
-- копия в другой чат/канал (copyMessage)
-- LLM-полировка при наличии OPENAI_API_KEY
+🚗 **Заголовок**
+Текст средней длины с <i>курсивными</i> ключевыми словами.
+🏎️ *РулЁжка* (https://t.me/drive_hedgehog)
 """
 
 import argparse
@@ -30,7 +27,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/1.6)"
+DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/1.7)"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 STATE_FILE = "seen.json"
 
@@ -99,6 +96,23 @@ def extract_listing_links(list_html: str, base_url: Optional[str], selector: str
     return out
 
 
+def normalize_title(title: str) -> str:
+    """Убираем хвосты вида '— Autonews', ':: Autonews', '| Autonews', 'Главное :: Autonews' и т.п."""
+    t = title.strip()
+    # Уберём двойные двоеточия/пайпы и хвосты брендов
+    patterns = [
+        r"\s*[-–—|:]{1,3}\s*(Главное\s*)?::?\s*Autonews(?:\.ru)?\s*$",
+        r"\s*[-–—|:]{1,3}\s*Autonews(?:\.ru)?\s*$",
+        r"\s*\|\s*(Главное|Новости)\s*$",
+        r"\s*::\s*(Главное|Новости)\s*$",
+    ]
+    for p in patterns:
+        t = re.sub(p, "", t, flags=re.IGNORECASE)
+    # Иногда встречается «Главное ::» в середине — режем по разделителю и берём левую часть, если правая пустая/брендовая
+    t = re.split(r"\s[-–—|:]{1,3}\s", t)[0].strip() or t
+    return t
+
+
 def choose_emoji(title: str, text: str) -> str:
     s = (title + " " + text).lower()
     for keys, e in EMOJI_MAP:
@@ -155,7 +169,7 @@ def parse_article(url: str, base_url: Optional[str]) -> tuple[str, Optional[str]
         title = t["content"].strip()
     if not title and soup.title and soup.title.string:
         title = soup.title.string.strip()
-    title = title or url
+    title = normalize_title(title or url)
 
     # image
     image = None
@@ -186,7 +200,7 @@ def parse_article(url: str, base_url: Optional[str]) -> tuple[str, Optional[str]
         if txt and not is_junk(txt):
             paras.append(txt)
 
-    # Ensure we have some text
+    # fallback to og:description
     if not paras:
         desc = soup.find("meta", property="og:description")
         if desc and desc.get("content"):
@@ -195,37 +209,43 @@ def parse_article(url: str, base_url: Optional[str]) -> tuple[str, Optional[str]
     return title, image, paras
 
 
-def italicize_some_keywords(text: str, max_terms=4) -> str:
-    """На случай отсутствия LLM: курсив 2–4 ключевых слов (простая эвристика)."""
+# ---------------- Курсив (без LLM) ----------------
+def italicize_keywords(text: str, max_terms=8) -> str:
+    """
+    4–8 ключевых слов в курсиве (<i>…</i>), выбираем по частоте и длине.
+    Оборачиваем только первые вхождения, чтобы не переборщить.
+    """
     words = re.findall(r"[A-Za-zА-Яа-яЁё0-9\-]{5,}", text)
-    stop = set("которые который которая которое также если этого нужно между более очень тогда чтобы через после перед связи своем своем своей своих всего может пока пока любом любом таких такие такая такое будет будут стали столько такой таких этих этим этом".split())
-    # Выбираем «часто встречающиеся» и не стоп-слова
+    stop = set("""
+        которые который которая которое также если этого нужно между более очень тогда чтобы через после перед связи своем своей своих всего может пока любом таких такие такая такое будет будут стали столько такой таких этих этим этом потому такой-то
+    """.split())
     freq = {}
     for w in words:
         lw = w.lower()
         if lw in stop:
             continue
         freq[lw] = freq.get(lw, 0) + 1
-    terms = sorted(freq, key=freq.get, reverse=True)[:max_terms]
-    # Оборачиваем первые вхождения
+    terms = [w for w in sorted(freq, key=freq.get, reverse=True) if len(w) >= 5][:max_terms]
+    used = set()
+
     def repl(m):
         w = m.group(0)
         lw = w.lower()
-        if lw in terms and not hasattr(repl, "used") or lw not in getattr(repl, "used", set()):
-            repl.used = getattr(repl, "used", set()); repl.used.add(lw)
+        if lw in terms and lw not in used:
+            used.add(lw)
             return f"<i>{w}</i>"
         return w
-    return re.sub(r"[A-Za-zА-Яа-яЁё0-9\-]{5,}", repl, text, count=0)
+
+    return re.sub(r"[A-Za-zА-Яа-яЁё0-9\-]{5,}", repl, text)
 
 
 # ---------------- LLM “повар” ----------------
 def llm_make_text(title: str, merged_text: str) -> Optional[str]:
     """
     Если задан OPENAI_API_KEY — просим модель:
-    - выдать 1–3 абзаца средней длины без пунктов
-    - выделить 2–4 ключевых слова КУРСИВОМ с тегами <i>…</i>
-    - не вставлять ссылки и призывы
-    - без HTML кроме <i>
+    - выдать 1–3 абзаца средней длины без пунктов и ссылок,
+    - выделить <i>курсивом</i> 4–8 ключевых слов,
+    - никаких лишних HTML-тегов (разрешён только <i>).
     """
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -236,7 +256,7 @@ def llm_make_text(title: str, merged_text: str) -> Optional[str]:
             "model": "gpt-4o-mini",
             "temperature": 0.3,
             "messages": [
-                {"role": "system", "content": "Ты помогаешь написать краткий автоновостной пост. Формат: 1–3 абзаца средней длины. Без пунктов/списков. Без ссылок. Используй курсив у 2–4 ключевых слов с тегами <i>…</i>. Больше никаких HTML-тегов."},
+                {"role": "system", "content": "Напиши 1–3 абзаца средней длины по авто-новости. Без пунктов/списков. Без ссылок. Выдели курсивом 4–8 ключевых слов тегами <i>…</i>. Больше никаких HTML-тегов."},
                 {"role": "user", "content": f"Заголовок: {title}\n\nТекст для сжатия и очистки:\n{merged_text}"}
             ]
         }
@@ -249,7 +269,7 @@ def llm_make_text(title: str, merged_text: str) -> Optional[str]:
         with _url.urlopen(req, timeout=25) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
         t = data["choices"][0]["message"]["content"].strip()
-        # Разрешаем только <i>…</i>, остальное экранируем.
+        # Разрешаем только <i>…</i>, остальное экранируем
         t = t.replace("\r", "")
         t_esc = html.escape(t)
         t_esc = t_esc.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
@@ -322,10 +342,12 @@ def main():
             continue
 
         title, image, paras = parse_article(link, args.base_url)
-        base_text = medium_text(paras, target=700)
+        base_text = medium_text(paras, target=750)
 
-        # LLM-повар или локальный курсив
-        cooked = llm_make_text(title, base_text) or italicize_some_keywords(base_text)
+        # LLM или локальная курсивизация (усиленная)
+        cooked = llm_make_text(title, base_text)
+        if not cooked:
+            cooked = italicize_keywords(base_text, max_terms=8)
 
         # Финальная сборка caption (без ссылки на источник!)
         emoji = choose_emoji(title, base_text)
