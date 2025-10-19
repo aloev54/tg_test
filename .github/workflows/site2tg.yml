@@ -1,0 +1,27 @@
+name: site2tg-autonews
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Post new Autonews items
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python site_to_telegram.py --mode html \
+            --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8" \
+            --item-selector "a[href*='/news/']" \
+            --limit 8 \
+            --post-prefix "🛞 Автоновость дня:" \
+            --post-suffix "🏎️ *РулЁжка* (https://t.me/drive_hedgehog)" \
+            --state "autonews_seen.json"
