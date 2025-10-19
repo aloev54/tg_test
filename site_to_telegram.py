@@ -2,19 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 site_to_telegram.py — РулЁжка-стайл (LLM + лимит 1024 символа)
-
-Формат поста:
-🚗 **Заголовок**
-Интригующее вступление (1–2 строки).
-1️⃣ ... (факт/деталь, можно с *курсивом* и **жирными акцентами**)
-2️⃣ ...
-3️⃣ ...
-Короткая финальная мысль/совет (1 строка).
-🏎️ РулЁжка (https://t.me/drive_hedgehog)
-
-— без ссылок на источник
-— без обычных маркеров/точек-• (только 1️⃣ 2️⃣ 3️⃣ ...)
-— Telegram caption <= 1024 символа, текст не обрезается
 """
 
 import argparse, html, json, os, re, sys, time
@@ -57,6 +44,7 @@ class Item:
     image: Optional[str]
     paras: List[str]
 
+# ----------- helpers -----------
 def fetch_html(url:str)->str:
     r=requests.get(url,headers={"User-Agent":DEFAULT_UA},timeout=25)
     r.raise_for_status();return r.text
@@ -119,14 +107,15 @@ def join_text(paras:List[str],limit=900)->str:
         out.append(p);cur+=len(p)
     return " ".join(out)
 
+# ----------- LLM -----------
 def llm_style_post(title:str,text:str)->Optional[str]:
     api=os.getenv("OPENAI_API_KEY","").strip()
     if not api: return None
     import json,urllib.request as urlreq
     prompt=(
-        "Ты создаёшь короткий пост для Telegram (до 1024 символов). "
+        "Создай пост до 1024 символов для Telegram-канала об автомобилях. "
         "Стиль: живо и эмоционально, как автолюбитель. "
-        "1–2 строки интро, потом 3–4 нумерованных блока с эмодзи 1️⃣ 2️⃣ 3️⃣ 4️⃣. "
+        "1–2 строки интро, потом 3–4 блока с эмодзи 1️⃣ 2️⃣ 3️⃣ 4️⃣. "
         "Добавляй факты, цифры, эмоции. "
         "Выделяй <b>жирным</b> и <i>курсивом</i>. "
         "Не вставляй ссылки, не превышай 1024 символа, не обрезай текст."
@@ -155,15 +144,20 @@ def llm_style_post(title:str,text:str)->Optional[str]:
     except Exception:
         return None
 
+# ----------- fallback -----------
 def fallback_style_post(title,text)->str:
     sents=re.split(r"(?<=[.!?])\s+",text)
     intro=" ".join(sents[:2])
     pts=sents[2:6]
     emojis=["1️⃣","2️⃣","3️⃣","4️⃣"]
-    body=[f"{emojis[i]} {re.sub(r'(\\d+)',r'<b>\\1</b>',pts[i])}" for i in range(min(len(pts),4))]
+    body=[]
+    for i in range(min(len(pts),4)):
+        p=re.sub(r"(\d+)",r"<b>\1</b>",pts[i])
+        body.append(emojis[i]+" "+p)
     t=intro+"\n"+"\n".join(body)
     return t[:1024]
 
+# ----------- Telegram -----------
 def tg_send_photo(token,chat,caption,photo,thread=None):
     d={"chat_id":chat,"caption":caption,"parse_mode":"HTML"}
     if thread:d["message_thread_id"]=thread
@@ -176,6 +170,7 @@ def tg_copy(token,from_chat,msg,to_chat):
         "from_chat_id":from_chat,"message_id":msg,"chat_id":to_chat
     },timeout=15)
 
+# ----------- main -----------
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--url",required=True)
@@ -187,14 +182,17 @@ def main():
     ap.add_argument("--thread-id",type=int)
     ap.add_argument("--copy-to-chat-id")
     a=ap.parse_args()
+
     token=os.getenv("TELEGRAM_BOT_TOKEN","");chat=os.getenv("TELEGRAM_CHAT_ID","")
     if not token or not chat: sys.exit("Need TELEGRAM_BOT_TOKEN and CHAT_ID")
     th=a.thread_id or (int(os.getenv("TELEGRAM_THREAD_ID","0")) or None)
     copy=os.getenv("TELEGRAM_COPY_TO_CHAT_ID","").strip()
+
     seen=set()
     if os.path.exists(a.state):
         try: seen=set(json.load(open(a.state)))
         except: pass
+
     html_text=fetch_html(a.url)
     links=extract_listing_links(html_text,a.base_url,a.item_selector,a.limit)
     for link in links:
@@ -205,7 +203,7 @@ def main():
         emoji=choose_emoji(it.title,merged)
         closing="Берегите себя на дороге и выбирайте с умом."
         caption=f"{emoji} <b>{html.escape(it.title)}</b>\n\n{body}\n\n{closing}\n\n🏎️ РулЁжка (https://t.me/drive_hedgehog)"
-        if len(caption)>1024: caption=caption[:1024]
+        caption=caption[:1024]
         msg=tg_send_photo(token,chat,caption,it.image if a.with_photo else None,th)
         if copy: tg_copy(token,chat,msg,copy)
         seen.add(link)
