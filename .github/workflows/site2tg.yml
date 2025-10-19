@@ -12,10 +12,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - name: Post new Autonews items (with photo)
+      - run: pip install requests beautifulsoup4
+      - name: Post in РулЁжка style (with photo)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+          TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }}
         run: |
-          python site_to_telegram.py --mode html             --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8"             --item-selector "a[href*='/news/']"             --limit 6             --post-suffix "РулЁжка — https://t.me/drive_hedgehog"             --state "autonews_seen.json"             --with-photo
+          python site_to_telegram.py \
+            --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8" \
+            --item-selector "a[href*='/news/']" \
+            --limit 5 \
+            --state "autonews_seen.json" \
+            --with-photo
