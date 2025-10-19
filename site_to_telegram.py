@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-site_to_telegram.py — РулЁжка-стайл (LLM + анти-реклама)
-Изменения:
-- Чистим хвосты у заголовков: «Главное :: Autonews», «— Autonews», «| Autonews» и т.п.
-- Больше курсива по ключевым словам (4–8 терминов).
-- Пост без пунктов, ссылка на источник не вставляется, есть подпись канала и фото.
+site_to_telegram.py — РулЁжка-стайл (LLM + анти-реклама + нумерация эмодзи)
 
 Формат поста:
 🚗 **Заголовок**
-Текст средней длины с <i>курсивными</i> ключевыми словами.
-🏎️ *РулЁжка* (https://t.me/drive_hedgehog)
+Интригующее вступление (1–2 строки).
+1️⃣ ... (факт/деталь, можно с *курсивом* и **жирными акцентами**)
+2️⃣ ...
+3️⃣ ...
+Короткая финальная мысль/совет (1 строка).
+🏎️ РулЁжка (https://t.me/drive_hedgehog)
+
+— без ссылок на источник
+— без обычных маркеров/точек-• (только 1️⃣ 2️⃣ 3️⃣ ...)
+— отправляется как photo+caption (HTML), разрешены <b> и <i>
+— поддержка темы (message_thread_id) и копии в канал (copyMessage)
 """
 
 import argparse
@@ -27,7 +32,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/1.7)"
+DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/1.8)"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 STATE_FILE = "seen.json"
 
@@ -39,46 +44,43 @@ ARTICLE_SELECTORS = [
     ".article",
 ]
 DROP_SELECTORS = [
-    "script", "style", "noscript",
-    "[class*='advert']", "[class*='ad-']", "[class*='ad_']", "[id*='ad']",
-    "[class*='banner']", "[class*='promo']",
-    "[class*='subscribe']", "[class*='subscription']",
-    "[class*='breadcrumbs']", "[class*='share']", "[class*='social']",
-    "[class*='tags']", "[class*='related']", "[class*='widget']",
-    "figure figcaption", ".photo-credit", ".copyright",
+    "script","style","noscript",
+    "[class*='advert']","[class*='ad-']","[class*='ad_]","[id*='ad']",
+    "[class*='banner']","[class*='promo']",
+    "[class*='subscribe']","[class*='subscription']",
+    "[class*='breadcrumbs']","[class*='share']","[class*='social']",
+    "[class*='tags']","[class*='related']","[class*='widget']",
+    "figure figcaption",".photo-credit",".copyright",
 ]
 DROP_PHRASES = [
-    "реклама", "подписывайтесь", "подпишитесь", "подписка",
-    "читайте также", "смотрите также", "узнать больше", "рассылка",
-    "наш телеграм", "наш telegram", "instagram", "vk.com", "вконтакте",
-    "скачайте приложение", "присоединяйтесь к", "промокод",
+    "реклама","подписывайтесь","подпишитесь","подписка",
+    "читайте также","смотрите также","узнать больше","рассылка",
+    "наш телеграм","наш telegram","instagram","vk.com","вконтакте",
+    "скачайте приложение","присоединяйтесь к","промокод",
 ]
 
 EMOJI_MAP = [
-    (["дтп", "авар", "столкнов"], "🚨"),
-    (["штраф", "налог", "пошлин", "утильсбор"], "💸"),
-    (["электро", "ev", "батар", "заряд"], "⚡"),
-    (["бензин", "дизел", "топлив"], "⛽"),
-    (["трасс", "дорог", "ремонт", "мост"], "🛣️"),
-    (["тест", "обзор", "тест-драйв"], "🧪"),
-    (["гонк", "трек", "ралли", "спорт"], "🏁"),
+    (["дтп","авар","столкнов"], "🚨"),
+    (["штраф","налог","пошлин","утильсбор"], "💸"),
+    (["электро","ev","батар","заряд"], "⚡"),
+    (["бензин","дизел","топлив"], "⛽"),
+    (["трасс","дорог","ремонт","мост"], "🛣️"),
+    (["тест","обзор","тест-драйв"], "🧪"),
+    (["гонк","трек","ралли","спорт"], "🏁"),
 ]
-
 
 @dataclass
 class Item:
     title: str
     url: str
-    text: str            # готовый текст (с <i>курсивом</i>), без пунктов
     image: Optional[str]
-
+    paras: List[str]  # очищенные абзацы статьи
 
 # ---------------- Core helpers ----------------
 def fetch_html(url: str) -> str:
     r = requests.get(url, headers={"User-Agent": DEFAULT_UA}, timeout=25)
     r.raise_for_status()
     return r.text
-
 
 def extract_listing_links(list_html: str, base_url: Optional[str], selector: str, limit: int) -> List[str]:
     soup = BeautifulSoup(list_html, "html.parser")
@@ -95,11 +97,8 @@ def extract_listing_links(list_html: str, base_url: Optional[str], selector: str
             out.append(u); seen.add(u)
     return out
 
-
 def normalize_title(title: str) -> str:
-    """Убираем хвосты вида '— Autonews', ':: Autonews', '| Autonews', 'Главное :: Autonews' и т.п."""
     t = title.strip()
-    # Уберём двойные двоеточия/пайпы и хвосты брендов
     patterns = [
         r"\s*[-–—|:]{1,3}\s*(Главное\s*)?::?\s*Autonews(?:\.ru)?\s*$",
         r"\s*[-–—|:]{1,3}\s*Autonews(?:\.ru)?\s*$",
@@ -108,65 +107,27 @@ def normalize_title(title: str) -> str:
     ]
     for p in patterns:
         t = re.sub(p, "", t, flags=re.IGNORECASE)
-    # Иногда встречается «Главное ::» в середине — режем по разделителю и берём левую часть, если правая пустая/брендовая
     t = re.split(r"\s[-–—|:]{1,3}\s", t)[0].strip() or t
     return t
-
-
-def choose_emoji(title: str, text: str) -> str:
-    s = (title + " " + text).lower()
-    for keys, e in EMOJI_MAP:
-        if any(k in s for k in keys):
-            return e
-    return "🚗"
-
 
 def clean_text(t: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"Читайте также.*$", "", t, flags=re.I)
     return t
 
-
 def is_junk(t: str) -> bool:
     lt = t.lower()
-    if len(lt) < 40:
-        return True
+    if len(lt) < 40: return True
     return any(p in lt for p in DROP_PHRASES)
 
-
-def split_sents(text: str) -> List[str]:
-    parts = re.split(r"(?<=[.!?…])\s+", text)
-    return [p.strip() for p in parts if p.strip()]
-
-
-def medium_text(paras: List[str], target=700) -> str:
-    # Собираем 1–3 абзаца средней длины без пунктов
-    sents = split_sents(" ".join(paras))
-    out, cur = [], 0
-    for s in sents:
-        if is_junk(s):
-            continue
-        if cur + len(s) > target and out:
-            break
-        out.append(s); cur += len(s) + 1
-        if len(out) >= 5:
-            break
-    text = " ".join(out).strip()
-    if len(text) > target + 150:
-        text = text[:target].rstrip() + "…"
-    return text
-
-
-def parse_article(url: str, base_url: Optional[str]) -> tuple[str, Optional[str], List[str]]:
-    """return title, image, clean paragraphs list"""
+def parse_article(url: str, base_url: Optional[str]) -> Item:
     html_text = fetch_html(url)
     soup = BeautifulSoup(html_text, "html.parser")
 
     # title
     title = None
     t = soup.find("meta", property="og:title")
-    if t and t.get("content"):
-        title = t["content"].strip()
+    if t and t.get("content"): title = t["content"].strip()
     if not title and soup.title and soup.title.string:
         title = soup.title.string.strip()
     title = normalize_title(title or url)
@@ -174,90 +135,77 @@ def parse_article(url: str, base_url: Optional[str]) -> tuple[str, Optional[str]
     # image
     image = None
     im = soup.find("meta", property="og:image")
-    if im and im.get("content"):
-        image = im["content"].strip()
-    if image and base_url:
-        image = urljoin(base_url, image)
+    if im and im.get("content"): image = im["content"].strip()
+    if image and base_url: image = urljoin(base_url, image)
 
-    # body
+    # body root
     root = None
     for sel in ARTICLE_SELECTORS:
         node = soup.select_one(sel)
-        if node:
-            root = node; break
-    if not root:
-        root = soup
+        if node: root = node; break
+    if not root: root = soup
 
     # drop junk nodes
     for sel in DROP_SELECTORS:
-        for node in root.select(sel):
-            node.decompose()
+        for node in root.select(sel): node.decompose()
 
-    # collect paragraphs
+    # paragraphs
     paras = []
     for p in root.find_all("p"):
         txt = clean_text(p.get_text(" ", strip=True))
-        if txt and not is_junk(txt):
-            paras.append(txt)
+        if txt and not is_junk(txt): paras.append(txt)
 
-    # fallback to og:description
     if not paras:
         desc = soup.find("meta", property="og:description")
-        if desc and desc.get("content"):
-            paras = [desc["content"].strip()]
+        if desc and desc.get("content"): paras = [desc["content"].strip()]
 
-    return title, image, paras
+    return Item(title=title, url=url, image=image, paras=paras[:14])
 
+def choose_emoji(title: str, text: str) -> str:
+    s = (title + " " + text).lower()
+    for keys, e in EMOJI_MAP:
+        if any(k in s for k in keys): return e
+    return "🚗"
 
-# ---------------- Курсив (без LLM) ----------------
-def italicize_keywords(text: str, max_terms=8) -> str:
+def join_for_llm(paras: List[str], target=900) -> str:
+    out, cur = [], 0
+    for p in paras:
+        if cur + len(p) > target and out: break
+        out.append(p); cur += len(p) + 1
+        if len(out) >= 6: break
+    return " ".join(out)
+
+# ---------------- LLM style (preferred) ----------------
+def llm_style_post(title: str, merged_text: str) -> Optional[str]:
     """
-    4–8 ключевых слов в курсиве (<i>…</i>), выбираем по частоте и длине.
-    Оборачиваем только первые вхождения, чтобы не переборщить.
-    """
-    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9\-]{5,}", text)
-    stop = set("""
-        которые который которая которое также если этого нужно между более очень тогда чтобы через после перед связи своем своей своих всего может пока любом таких такие такая такое будет будут стали столько такой таких этих этим этом потому такой-то
-    """.split())
-    freq = {}
-    for w in words:
-        lw = w.lower()
-        if lw in stop:
-            continue
-        freq[lw] = freq.get(lw, 0) + 1
-    terms = [w for w in sorted(freq, key=freq.get, reverse=True) if len(w) >= 5][:max_terms]
-    used = set()
-
-    def repl(m):
-        w = m.group(0)
-        lw = w.lower()
-        if lw in terms and lw not in used:
-            used.add(lw)
-            return f"<i>{w}</i>"
-        return w
-
-    return re.sub(r"[A-Za-zА-Яа-яЁё0-9\-]{5,}", repl, text)
-
-
-# ---------------- LLM “повар” ----------------
-def llm_make_text(title: str, merged_text: str) -> Optional[str]:
-    """
-    Если задан OPENAI_API_KEY — просим модель:
-    - выдать 1–3 абзаца средней длины без пунктов и ссылок,
-    - выделить <i>курсивом</i> 4–8 ключевых слов,
-    - никаких лишних HTML-тегов (разрешён только <i>).
+    Требуем у модели:
+    - 1–2 строки интригующего вступления (без списка)
+    - затем 3–5 нумерованных пунктов с эмодзи 1️⃣ 2️⃣ 3️⃣ ... (не '-', не '•')
+    - **жирный** для ключевых моментов, <i>курсив</i> для 4–8 деталей
+    - без ссылок и призывов
+    - без посторонних HTML, кроме <b> и <i>
+    Возвращаем HTML-строку (только <b> и <i> допустимы).
     """
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
     try:
         import json as _json, urllib.request as _url
+        sys_prompt = (
+            "Ты пишешь пост для автоканала. Стиль: живо, цепляюще, как увлечённый автолюбитель. "
+            "Сначала дай 1–2 строки интригующего вступления. Потом 3–5 пронумерованных блоков с эмодзи "
+            "1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣. Не используй '-' или '•'. В каждом блоке добавляй цифры/факты/детали, "
+            "немного эмоций или сравнения. Ключевые моменты выделяй <b>жирным</b>, интересные детали — <i>курсивом</i> "
+            "(итого 4–8 курсивных фрагментов). Не вставляй ссылки и призывы. Возврати чистый текст без лишних тегов, "
+            "кроме <b> и <i>. Не добавляй заголовок — только тело поста."
+        )
+        user_prompt = f"Заголовок: {title}\n\nТекст для обработки:\n{merged_text}"
         payload = {
             "model": "gpt-4o-mini",
-            "temperature": 0.3,
+            "temperature": 0.35,
             "messages": [
-                {"role": "system", "content": "Напиши 1–3 абзаца средней длины по авто-новости. Без пунктов/списков. Без ссылок. Выдели курсивом 4–8 ключевых слов тегами <i>…</i>. Больше никаких HTML-тегов."},
-                {"role": "user", "content": f"Заголовок: {title}\n\nТекст для сжатия и очистки:\n{merged_text}"}
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
             ]
         }
         req = _url.Request(
@@ -268,41 +216,62 @@ def llm_make_text(title: str, merged_text: str) -> Optional[str]:
         )
         with _url.urlopen(req, timeout=25) as resp:
             data = _json.loads(resp.read().decode("utf-8"))
-        t = data["choices"][0]["message"]["content"].strip()
-        # Разрешаем только <i>…</i>, остальное экранируем
-        t = t.replace("\r", "")
-        t_esc = html.escape(t)
-        t_esc = t_esc.replace("&lt;i&gt;", "<i>").replace("&lt;/i&gt;", "</i>")
-        return t_esc
+        t = data["choices"][0]["message"]["content"].strip().replace("\r", "")
+        # Разрешаем только <b> и <i>
+        t = html.escape(t).replace("&lt;b&gt;","<b>").replace("&lt;/b&gt;","</b>").replace("&lt;i&gt;","<i>").replace("&lt;/i&gt;","</i>")
+        # Небольшая защита от дефисов/пулек
+        t = re.sub(r"^[\-\*•]\s+", "", t, flags=re.M)  # уберём маркеры в начале строк, если вдруг
+        return t
     except Exception:
         return None
 
+# ---------------- Fallback (без LLM) ----------------
+def fallback_style_post(title: str, merged_text: str) -> str:
+    # интро: первые 1–2 предложения
+    sents = re.split(r"(?<=[.!?…])\s+", merged_text)
+    intro = " ".join(sents[:2]).strip()
+    # 3–4 пункта: берём следующие насыщенные предложениями части
+    points = []
+    for s in sents[2:]:
+        s = s.strip()
+        if 50 <= len(s) <= 220:
+            # Добавим чуть акцентов
+            s = re.sub(r"\b(\d[\d\s.,%]*\d|\d+)\b", r"<b>\1</b>", s)  # числа жирным
+            # 4–8 курсивных фрагментов за всё тело — здесь слегка добавим
+            s = re.sub(r"\b([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{6,})\b", r"<i>\1</i>", s, count=1)
+            points.append(s)
+        if len(points) >= 4:
+            break
+    if not intro:
+        intro = merged_text[:220].rstrip() + "…"
+    # Сборка с эмодзи-нумерацией
+    out_lines = [intro]
+    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣"]
+    for i, pt in enumerate(points, 1):
+        out_lines.append(f"{emojis[i-1]} {pt}")
+    return "\n".join(out_lines).strip()
 
 # ---------------- Telegram ----------------
 def tg_send_photo(token: str, chat_id: str, caption_html: str, photo_url: Optional[str], thread_id: Optional[int] = None) -> int:
     url = f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto"
     data = {"chat_id": chat_id, "caption": caption_html, "parse_mode": "HTML"}
-    if thread_id is not None:
-        data["message_thread_id"] = thread_id
-    if photo_url:
-        data["photo"] = photo_url
+    if thread_id is not None: data["message_thread_id"] = thread_id
+    if photo_url: data["photo"] = photo_url
     r = requests.post(url, data=data, timeout=25)
     r.raise_for_status()
     return r.json()["result"]["message_id"]
-
 
 def tg_copy(token: str, from_chat: str, msg_id: int, to_chat: str):
     url = f"{TELEGRAM_API_BASE}/bot{token}/copyMessage"
     data = {"from_chat_id": from_chat, "message_id": msg_id, "chat_id": to_chat}
     requests.post(url, data=data, timeout=20)
 
-
 # ---------------- Main ----------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--item-selector", required=True)
-    ap.add_argument("--limit", type=int, default=6)
+    ap.add_argument("--limit", type=int, default=1)  # берём одну последнюю
     ap.add_argument("--base-url")
     ap.add_argument("--state", default=STATE_FILE)
     ap.add_argument("--with-photo", action="store_true")
@@ -310,69 +279,52 @@ def main():
     ap.add_argument("--copy-to-chat-id")
     args = ap.parse_args()
 
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    token = os.getenv("TELEGRAM_BOT_TOKEN","").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID","").strip()
     if not token or not chat_id:
         print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID", file=sys.stderr); sys.exit(2)
 
-    # тема/копия
     thread_id = args.thread_id
     if thread_id is None:
-        thread_env = os.getenv("TELEGRAM_THREAD_ID", "").strip()
-        if thread_env.isdigit():
-            thread_id = int(thread_env)
-    copy_chat = os.getenv("TELEGRAM_COPY_TO_CHAT_ID", "").strip() or (args.copy_to_chat_id or "").strip()
+        env_th = os.getenv("TELEGRAM_THREAD_ID","").strip()
+        if env_th.isdigit(): thread_id = int(env_th)
+    copy_chat = os.getenv("TELEGRAM_COPY_TO_CHAT_ID","").strip() or (args.copy_to_chat_id or "").strip()
 
-    # список ссылок
     listing = fetch_html(args.url)
     links = extract_listing_links(listing, args.base_url, args.item_selector, args.limit)
 
     # state
     seen = set()
     if os.path.exists(args.state):
-        try:
-            seen = set(json.load(open(args.state, "r", encoding="utf-8")))
-        except Exception:
-            seen = set()
+        try: seen = set(json.load(open(args.state,"r",encoding="utf-8")))
+        except Exception: seen = set()
 
     posted = 0
     for link in links:
-        uid = link  # URL как id
-        if uid in seen:
-            continue
+        if link in seen: continue
+        item = parse_article(link, args.base_url)
+        merged = join_for_llm(item.paras, target=900)
 
-        title, image, paras = parse_article(link, args.base_url)
-        base_text = medium_text(paras, target=750)
-
-        # LLM или локальная курсивизация (усиленная)
-        cooked = llm_make_text(title, base_text)
-        if not cooked:
-            cooked = italicize_keywords(base_text, max_terms=8)
-
-        # Финальная сборка caption (без ссылки на источник!)
-        emoji = choose_emoji(title, base_text)
-        cap_parts = [
-            f"{emoji} <b>{html.escape(title)}</b>",
-            cooked,
-            "🏎️ *РулЁжка* (https://t.me/drive_hedgehog)",
-        ]
-        caption = "\n\n".join([p for p in cap_parts if p]).strip()
+        body = llm_style_post(item.title, merged) or fallback_style_post(item.title, merged)
+        # финальная короткая мысль
+        closing = "Берегите себя на дороге и выбирайте с умом."
+        # заголовок + тело + мысль + подпись
+        emoji = choose_emoji(item.title, merged)
+        caption = f"{emoji} <b>{html.escape(item.title)}</b>\n\n{body}\n\n{closing}\n\n🏎️ РулЁжка (https://t.me/drive_hedgehog)"
+        # ограничим длину caption до ~1024 для фото
         if len(caption) > 1024:
-            caption = caption[:1000].rstrip() + "…\n\n🏎️ *РулЁжка* (https://t.me/drive_hedgehog)"
+            caption = caption[:1000].rstrip() + "…\n\n🏎️ РулЁжка (https://t.me/drive_hedgehog)"
 
-        msg_id = tg_send_photo(token, chat_id, caption, image if args.with_photo else None, thread_id)
-        if copy_chat:
-            tg_copy(token, chat_id, msg_id, copy_chat)
+        msg_id = tg_send_photo(token, chat_id, caption, item.image if args.with_photo else None, thread_id)
+        if copy_chat: tg_copy(token, chat_id, msg_id, copy_chat)
 
-        seen.add(uid)
-        with open(args.state, "w", encoding="utf-8") as f:
-            json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
+        seen.add(link)
+        with open(args.state,"w",encoding="utf-8") as f: json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
 
         posted += 1
-        time.sleep(1.1)
+        time.sleep(1.0)
 
     print(f"Done. Posted {posted} item(s).")
-
 
 if __name__ == "__main__":
     main()
