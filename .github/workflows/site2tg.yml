@@ -8,6 +8,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 20           # ↑ увеличили лимит на весь job
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,10 +18,12 @@ jobs:
         run: pip install requests beautifulsoup4
       - name: Run multi-site poster
         env:
+          PYTHONUNBUFFERED: "1"                  # стрим логов без буфера
+          PER_SITE_TIMEOUT_SEC: "120"            # опционально: таймаут на сайт
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}            # если нужна тема
-          TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }} # если дублировать в канал
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # для LLM-стилизации
+          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+          TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python run_sites.py
