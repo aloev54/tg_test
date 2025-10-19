@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-site_to_telegram.py — РулЁжка-стайл (LLM + лимит 1024 символа)
+site_to_telegram.py — РулЁжка-стайл (фото отдельно, текст отдельно, LLM-стилизация без лимита 1024)
 
-Формат поста:
-🚗 **Заголовок**
+Формат поста (TEXT message):
+🚗 <b>Заголовок</b>
+
 Интригующее вступление (1–2 строки).
-1️⃣ ... 2️⃣ ... 3️⃣ ...
-Короткая финальная мысль/совет.
-🏎️ РулЁжка (https://t.me/drive_hedgehog)
 
-— без ссылок на источник
-— только <b> и <i> в HTML
-— caption строго <= 1024 символов (никаких обрезаний троеточием)
+1️⃣ ... (факты/цифры/детали с эмоцией; допускается <b>жирный</b>, <i>курсив</i>)
+2️⃣ ...
+3️⃣ ...
+
+Короткая финальная мысль.
+
+🏎️ <a href="https://t.me/drive_hedgehog">РулЁжка</a>
+
+— без ссылок на источники
+— без обычных маркеров (-, •)
+— эмодзи-нумерация 1️⃣ 2️⃣ 3️⃣ — только для перечислений, не перед каждым абзацем
+— фото отправляем ОТДЕЛЬНЫМ сообщением без подписи
 """
 
 import argparse, html, json, os, re, sys, time
@@ -23,7 +30,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/2.0)"
+DEFAULT_UA = "Mozilla/5.0 (compatible; rul-ezhka/2.1)"
 TELEGRAM_API_BASE = "https://api.telegram.org"
 STATE_FILE = "autonews_seen_nb.json"
 
@@ -68,7 +75,6 @@ def fetch_html(url:str)->str:
 
 def normalize_title(title:str)->str:
     t=title.strip()
-    # срезаем хвосты вроде «— Autonews», «| Autonews», «Главное :: Autonews»
     patterns=[
         r"\s*[-–—|:]{1,3}\s*(Главное\s*)?::?\s*Autonews(?:\.ru)?\s*$",
         r"\s*[-–—|:]{1,3}\s*Autonews(?:\.ru)?\s*$",
@@ -138,7 +144,7 @@ def parse_article(url:str,base_url:Optional[str])->Item:
         if d and d.get("content"):
             paras=[d["content"].strip()]
 
-    return Item(title=title,url=url,image=image,paras=paras[:12])
+    return Item(title=title,url=url,image=image,paras=paras[:14])
 
 def choose_emoji(title:str,text:str)->str:
     s=(title+" "+text).lower()
@@ -147,34 +153,41 @@ def choose_emoji(title:str,text:str)->str:
             return e
     return "🚗"
 
-def join_text(paras:List[str],limit:int=900)->str:
+def join_text(paras:List[str],limit:int=2000)->str:
     out,cur=[],0
     for p in paras:
         if cur+len(p)>limit: break
         out.append(p);cur+=len(p)+1
-        if len(out)>=6: break
+        if len(out)>=8: break
     return " ".join(out)
 
 # ---------------- LLM ----------------
 def llm_style_post(title:str,text:str)->Optional[str]:
+    """
+    Генерируем текст (не caption!) по твоим правилам, без лимита 1024.
+    Допускаются только <b> и <i>.
+    """
     api=os.getenv("OPENAI_API_KEY","").strip()
     if not api:
         return None
     import json,urllib.request as urlreq
-    sys_prompt = (
-    "Создай короткий пост (до 1024 символов) для Telegram-канала о машинах. "
-    "Пиши живо и эмоционально — как автолюбитель, который делится впечатлениями. "
-    "Не используй нумерацию. Начни с яркой фразы, потом расскажи 2–3 факта из текста с эмоцией, "
-    "и закончи лёгким советом или выводом. "
-    "Выделяй <b>ключевые моменты</b> и <i>интересные детали</i>. "
-    "Не вставляй ссылки, не повторяй заголовок, не превышай 1024 символа."
+    sys_prompt=(
+        "Создай пост для Telegram-канала про автомобили. Пиши живо и с увлечением — как автолюбитель, а не журналист. "
+        "Структура: 1) короткое интригующее вступление (1–2 строки), 2) основная часть с фактами, цифрами и деталями, "
+        "3) если уместно — перечисление с эмодзи-нумерацией 1️⃣ 2️⃣ 3️⃣ (используй нумерацию ТОЛЬКО для списков), "
+        "4) короткая финальная мысль/совет. "
+        "Добавляй немного эмоций, сравнений или метафор. "
+        "Форматирование: <b>жирный</b> — для заголовков и ключевых моментов; <i>курсив</i> — для деталей и уточнений. "
+        "НЕ используй обычные маркеры '-' или '•'. НЕ вставляй ссылки и призывы. "
+        "Верни чистый текст без посторонних HTML-тегов, кроме <b> и <i>."
     )
+    user_prompt = f"Заголовок: {title}\n\nОснова текста (очищенные абзацы):\n{text}"
     payload={
         "model":"gpt-4o-mini",
         "temperature":0.35,
         "messages":[
             {"role":"system","content":sys_prompt},
-            {"role":"user","content":f"Заголовок: {title}\n\nТекст для основы:\n{text}"}
+            {"role":"user","content":user_prompt}
         ]
     }
     req=urlreq.Request(
@@ -187,33 +200,30 @@ def llm_style_post(title:str,text:str)->Optional[str]:
         with urlreq.urlopen(req,timeout=30) as resp:
             d=json.loads(resp.read().decode("utf-8"))
         t=d["choices"][0]["message"]["content"].strip().replace("\r","")
-        # разрешаем только <b>/<i>
+        # Разрешаем только <b>/<i>
         t=html.escape(t).replace("&lt;b&gt;","<b>").replace("&lt;/b&gt;","</b>").replace("&lt;i&gt;","<i>").replace("&lt;/i&gt;","</i>")
-        return t[:1024]
+        # На всякий: уберём случайные маркеры в начале строк
+        t=re.sub(r"^[\-\*•]\s+","",t,flags=re.M)
+        return t
     except Exception:
         return None
 
-# ---------------- Fallback ----------------
-def fallback_style_post(title:str,text:str)->str:
-    # интро: 1–2 предложения
-    sents=re.split(r"(?<=[.!?…])\s+",text)
-    intro=" ".join(sents[:2]).strip()
-    # 3–4 пункта
-    pts=sents[2:6]
-    emojis=["1️⃣","2️⃣","3️⃣","4️⃣"]
-    body=[]
-    for i in range(min(len(pts),4)):
-        p=re.sub(r"(\d+)",r"<b>\1</b>",pts[i])  # числа жирным
-        body.append(emojis[i]+" "+p.strip())
-    out = intro + ("\n" if intro and body else "") + "\n".join(body)
-    return out[:1024]
-
 # ---------------- Telegram ----------------
-def tg_send_photo(token:str,chat_id:str,caption_html:str,photo_url:Optional[str],thread_id:Optional[int]=None)->int:
-    data={"chat_id":chat_id,"caption":caption_html,"parse_mode":"HTML"}
-    if thread_id is not None: data["message_thread_id"]=thread_id
-    if photo_url: data["photo"]=photo_url
+def tg_send_photo(token:str,chat_id:str,photo_url:Optional[str],thread_id:Optional[int]=None)->Optional[int]:
+    if not photo_url:
+        return None
+    data={"chat_id":chat_id,"photo":photo_url}
+    if thread_id is not None:
+        data["message_thread_id"]=thread_id
     r=requests.post(f"{TELEGRAM_API_BASE}/bot{token}/sendPhoto",data=data,timeout=30)
+    r.raise_for_status()
+    return r.json()["result"]["message_id"]
+
+def tg_send_text(token:str,chat_id:str,text_html:str,thread_id:Optional[int]=None)->int:
+    data={"chat_id":chat_id,"text":text_html,"parse_mode":"HTML","disable_web_page_preview":True}
+    if thread_id is not None:
+        data["message_thread_id"]=thread_id
+    r=requests.post(f"{TELEGRAM_API_BASE}/bot{token}/sendMessage",data=data,timeout=30)
     r.raise_for_status()
     return r.json()["result"]["message_id"]
 
@@ -227,7 +237,7 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--url",required=True)
     ap.add_argument("--item-selector",required=True)
-    ap.add_argument("--limit",type=int,default=1)  # одна последняя
+    ap.add_argument("--limit",type=int,default=1)  # берём последнюю
     ap.add_argument("--base-url")
     ap.add_argument("--state",default=STATE_FILE)
     ap.add_argument("--with-photo",action="store_true")
@@ -260,26 +270,39 @@ def main():
         except Exception:
             seen=set()
 
-    # список ссылок
+    # ссылки
     listing=fetch_html(a.url)
     links=extract_listing_links(listing,a.base_url,a.item_selector,a.limit)
 
     for link in links:
         if link in seen: continue
         item=parse_article(link,a.base_url)
-        merged=join_text(item.paras,limit=900)
+        merged=join_text(item.paras,limit=2000)
 
-        body=llm_style_post(item.title,merged) or fallback_style_post(item.title,merged)
+        # 1) отправляем фото (если есть и запрошено)
+        if a.with_photo and item.image:
+            tg_send_photo(token,chat,item.image,th)
 
-        # финальная мысль
-        closing="Берегите себя на дороге и выбирайте с умом."
+        # 2) готовим текст LLM (или фолбэк)
+        body=llm_style_post(item.title,merged)
+        if not body:
+            # простой фолбэк: интро + 1-3 пункта 1️⃣.. без «-»/«•»
+            sents=re.split(r"(?<=[.!?…])\s+", merged)
+            intro=" ".join(sents[:2]).strip()
+            pts=[s for s in sents[2:] if 50<=len(s)<=220][:3]
+            nums=["1️⃣","2️⃣","3️⃣"]
+            body = intro + ("\n\n" if intro else "")
+            for i,p in enumerate(pts):
+                body += f"{nums[i]} {p}\n"
+            body=body.strip()
 
-        # финальный caption (строго <=1024)
         emoji=choose_emoji(item.title,merged)
-        cap=f"{emoji} <b>{html.escape(item.title)}</b>\n\n{body}\n\n{closing}\n\n🏎️ РулЁжка (https://t.me/drive_hedgehog)"
-        cap=cap[:1024]
+        text = f"{emoji} <b>{html.escape(item.title)}</b>\n\n{body}\n\n🏎️ <a href=\"https://t.me/drive_hedgehog\">РулЁжка</a>"
 
-        msg_id=tg_send_photo(token,chat,cap,item.image if a.with_photo else None,th)
+        # 3) отправляем текст отдельным сообщением
+        msg_id = tg_send_text(token,chat,text,th)
+
+        # 4) при необходимости копируем текст в канал
         if copy:
             tg_copy(token,chat,msg_id,copy)
 
