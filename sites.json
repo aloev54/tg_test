@@ -1,0 +1,24 @@
+[
+  {
+    "name": "Autonews — Новости",
+    "url": "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8",
+    "item_selector": "a[href*='/news/']",
+    "base_url": "https://www.autonews.ru",
+    "limit": 1,
+    "state": "autonews_seen_nb.json",
+    "with_photo": true,
+    "thread_id": null,
+    "copy_to_chat_id": ""
+  },
+  {
+    "name": "Kolesa — Новости",
+    "url": "https://www.kolesa.ru/news",
+    "item_selector": "a[href^='/news/'], a[href^='https://www.kolesa.ru/news/']",
+    "base_url": "https://www.kolesa.ru",
+    "limit": 1,
+    "state": "kolesa_seen.json",
+    "with_photo": true,
+    "thread_id": null,
+    "copy_to_chat_id": ""
+  }
+]
