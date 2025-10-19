@@ -14,17 +14,17 @@ jobs:
           python-version: "3.11"
       - name: Install deps
         run: pip install requests beautifulsoup4
-      - name: Post in РулЁжка style (with photo)
+      - name: Post in РулЁжка style (no bullets, with italics, with photo)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}            # опционально: тема "Новости"
           TELEGRAM_COPY_TO_CHAT_ID: ${{ secrets.TELEGRAM_COPY_TO_CHAT_ID }} # опционально: куда копировать
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # опционально: для LLM-полировки
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}                     # для LLM-полировки (необязательно)
         run: |
           python site_to_telegram.py \
             --url "https://www.autonews.ru/tags/?tag=%D0%9D%D0%BE%D0%B2%D0%BE%D1%81%D1%82%D0%B8" \
             --item-selector "a[href*='/news/']" \
             --limit 6 \
-            --state "autonews_seen.json" \
+            --state "autonews_seen_nb.json" \
             --with-photo
